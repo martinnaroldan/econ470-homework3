@@ -2,146 +2,158 @@
 
 # Load necessary packages
 if (!require("pacman")) install.packages("pacman")
-pacman::p_load(tidyverse, ggplot2, dplyr, lubridate, stringr, readxl, data.table, gdata, modelsummary, AER)
-
-# Load the cleaned dataset
-final.data <- read_rds("data/output/TaxBurden_Data.rds")  # Preferred for maintaining data structure
+pacman::p_load(tidyverse, ggplot2, dplyr, lubridate, stringr, readxl, data.table, gdata, modelsummary, AER, fixest,kableExtra)
 
 
-# View structure and first few rows
-glimpse(final.data)
-head(final.data)
+# Read data and set workspace for knitr
+cig.data <- readRDS("data/output/TaxBurden_Data.rds")
 
-# Check for missing values
-colSums(is.na(final.data))
-
-# Summary statistics
-summary(final.data)
-
-# Compute mean, standard deviation, and histogram for key variables
-sum.vars <- final.data %>% select(
-  'Sales per Capita' = sales_per_capita, 
-  'Real Price' = price_cpi, 
-  'Nominal Price' = cost_per_pack
-)
-
-datasummary(All(sum.vars) ~ Mean + SD + Histogram, data = sum.vars)
-
-# Identify years with tax changes
-tax_changes <- final.data %>%
-  filter(Year >= 1970 & Year <= 1985) %>%
-  group_by(Year) %>%
-  summarize(proportion = mean(diff(tax_state) != 0, na.rm=TRUE))
-
-# Plot bar graph
-ggplot(tax_changes, aes(x = Year, y = proportion)) +
-  geom_bar(stat = "identity", fill = "blue") +
-  labs(title = "Proportion of States with a Cigarette Tax Change (1970-1985)",
-       x = "Year",
-       y = "Proportion of States") +
-  theme_bw()
-
-# Compute yearly averages
-avg_data <- final.data %>%
-  filter(Year >= 1970 & Year <= 2018) %>%
-  group_by(Year) %>%
-  summarize(avg_tax = mean(tax_dollar, na.rm=TRUE),
-            avg_price = mean(price_cpi, na.rm=TRUE))
-
-# Plot both variables on the same graph
-ggplot(avg_data, aes(x = Year)) +
-  geom_line(aes(y = avg_tax, color = "Tax (2012 dollars)"), size = 1) +
-  geom_line(aes(y = avg_price, color = "Price per Pack"), size = 1) +
-  labs(title = "Average Cigarette Tax and Price (1970-2018)",
-       x = "Year",
-       y = "Dollars",
-       color = "Legend") +
-  theme_bw()
-
-# Compute price increase for each state
-price_increase <- final.data %>%
+# Process Data
+cig.data <- cig.data %>%
   group_by(state) %>%
-  summarize(price_change = max(price_cpi, na.rm=TRUE) - min(price_cpi, na.rm=TRUE)) %>%
-  arrange(desc(price_change))
+  arrange(state, Year) %>%
+  mutate(
+    tax_change = tax_state - lag(tax_state),
+    tax_change_d = ifelse(tax_change == 0, 0, 1),
+    price_cpi_2012 = price_cpi,  
+    total_tax_cpi_2012 = tax_dollar * (230 / index),
+    ln_tax_2012 = log(total_tax_cpi_2012),
+    ln_sales = log(sales_per_capita),
+    ln_price_2012 = log(price_cpi_2012)
+  )
 
-# Select top 5 states
-top_5_highest <- head(price_increase, 5)$state
+## Tax changes
+tax.change.plot <- cig.data %>%
+  group_by(Year) %>%
+  filter(Year < 1986, Year > 1970) %>%
+  summarize(mean_change = mean(tax_change_d)) %>%
+  ggplot(aes(x = as.factor(Year), y = mean_change)) +
+  geom_bar(stat = "identity") +
+  labs(
+    x = "Year",
+    y = "Share of States"
+  ) +
+  ylim(0, 0.5)
+print(tax.change.plot)
 
-# Filter data for those states and plot
-high_states_data <- final.data %>%
-  filter(state %in% top_5_highest)
+## Tax and price data
+tax.price.data <- cig.data %>%
+  select(Year, state, total_tax_cpi_2012, price_cpi_2012) %>%
+  pivot_longer(cols = c(total_tax_cpi_2012, price_cpi_2012),
+               names_to = "var", values_to = "dollars")
 
-ggplot(high_states_data, aes(x = Year, y = sales_per_capita, color = state)) +
-  geom_line(size = 1) +
-  labs(title = "Cigarette Sales per Capita for Top 5 States with Highest Price Increase",
-       x = "Year",
-       y = "Packs per Capita") +
+
+tax.price.plot <- tax.price.data %>%
+  ggplot(aes(x = Year, y = dollars, color = var)) +
+  stat_summary(fun = mean, geom = "line", size = 1.2) +  
+  labs(
+    x = "Year",
+    y = "Dollars per Pack (2012 $)",
+    color = "Category"  
+  ) +
+  ylim(0, 10) +
+  scale_color_manual(
+    values = c("red", "blue"),
+    labels = c("Mean Tax", "Mean Price")
+  ) + 
+  theme_bw() +
+  theme(legend.position = "top") +  
+  scale_x_continuous(breaks = seq(1970, 2020, 5))
+
+print(tax.price.plot)
+
+## Price Changes
+cig.data.change <- cig.data %>%
+  ungroup() %>%
+  filter(Year == 1970) %>%
+  select(state, price_1970 = price_cpi_2012) %>%
+  left_join(cig.data %>% filter(Year == 2018) %>%
+              select(state, price_2018 = price_cpi_2012), by = "state") %>%
+  mutate(price_change = price_2018 - price_1970)
+
+high.change <- cig.data.change %>%
+  slice_max(price_change, n = 5) %>%
+  mutate(change_group = "high")
+
+low.change <- cig.data.change %>%
+  slice_min(price_change, n = 5) %>%
+  mutate(change_group = "low")
+
+change.group <- rbind(high.change, low.change)
+
+top.bottom.price <- cig.data %>%
+  ungroup() %>%
+  inner_join(change.group %>% select(state, change_group), by = "state")
+
+## Figure for high price changes
+high.price.plot <- top.bottom.price %>% filter(change_group=="high") %>%
+  ggplot(aes(x=Year, y=sales_per_capita, color=state)) +
+  stat_summary(fun="mean", geom="line") +
+  labs(
+    x="Year",
+    y="Packs per Capita",
+    color="State"
+  ) + theme_bw() +
+  scale_x_continuous(breaks=seq(1970, 2019, 5))
+print(high.price.plot)
+
+## Figure for low price changes
+low.price.plot <- top.bottom.price %>% filter(change_group=="low") %>%
+  ggplot(aes(x=Year, y=sales_per_capita, color=state)) +
+  stat_summary(fun="mean", geom="line") +
+  labs(
+    x="Year",
+    y="Packs per Capita",
+    color="State"
+  ) + theme_bw() +
+  scale_x_continuous(breaks=seq(1970, 2019, 5))
+print(low.price.plot)
+
+## Figure for high and low price changes
+
+combined.price.plot <- top.bottom.price %>%
+  ggplot(aes(x = Year, y = sales_per_capita, linetype = change_group)) +
+  stat_summary(fun = "mean", geom = "line", size = 1.2) +
+  labs(
+    x = "Year",
+    y = "Packs per Capita",
+    linetype = "Level of Price Increase"
+  ) +
+  geom_text(data = annotation_data, 
+            aes(x = Year + 2, y = mean_sales, label = change_group), 
+            fontface = "bold", size = 5, hjust = 0) +  # Moves text outside the right end
   theme_bw()
+print(combined.price.plot)
 
-# Select bottom 5 states
-top_5_lowest <- tail(price_increase, 5)$state
 
-# Filter data and plot
-low_states_data <- final.data %>%
-  filter(state %in% top_5_lowest)
+## Regression results 1970-1990
+ols1 <- feols(ln_sales ~ ln_price_2012, data=cig.data %>% filter(Year<1991))
+iv1 <- feols(ln_sales ~ 1 | ln_price_2012 ~ ln_tax_2012, data=cig.data %>% filter(Year<1991))
+first.stage <- feols(ln_price_2012 ~ ln_tax_2012, data=cig.data %>% filter(Year<1991))
+reduced.form <- feols(ln_sales ~ ln_tax_2012, data=cig.data %>% filter(Year<1991))
 
-ggplot(low_states_data, aes(x = Year, y = sales_per_capita, color = state)) +
-  geom_line(size = 1) +
-  labs(title = "Cigarette Sales per Capita for Top 5 States with Lowest Price Increase",
-       x = "Year",
-       y = "Packs per Capita") +
-  theme_bw()
+## Regression results 1991-2015
+ols2 <- feols(ln_sales ~ ln_price_2012, data=cig.data %>% filter(Year>1991 & Year<=2015))
+iv2 <- feols(ln_sales ~ 1 | ln_price_2012 ~ ln_tax_2012, data=cig.data %>% filter(Year>1991 & Year<=2015))
+first.stage2 <- feols(ln_price_2012 ~ ln_tax_2012, data=cig.data %>% filter(Year>1991 & Year<=2015))
+reduced.form2 <- feols(ln_sales ~ ln_tax_2012, data=cig.data %>% filter(Year>1991 & Year<=2015))
 
-ggplot() +
-  geom_line(data = high_states_data, aes(x = Year, y = sales_per_capita, color = "High Price Increase"), size = 1) +
-  geom_line(data = low_states_data, aes(x = Year, y = sales_per_capita, color = "Low Price Increase"), size = 1) +
-  labs(title = "Comparison of Cigarette Sales Trends",
-       x = "Year",
-       y = "Packs per Capita",
-       color = "State Group") +
-  theme_bw()
 
-# Regression for price elasticity
-elasticity_70_90 <- lm(log(sales_per_capita) ~ log(price_cpi), 
-                        data = final.data %>% filter(Year >= 1970 & Year <= 1990))
-summary(elasticity_70_90)
+rm(list=c("tax.price.data"))
 
-# IV Regression using tax as instrument
-iv_70_90 <- ivreg(log(sales_per_capita) ~ log(price_cpi) | tax_dollar, 
-                   data = final.data %>% filter(Year >= 1970 & Year <= 1990))
-summary(iv_70_90)
+f <- function(x) formatC(x, digits = 0, big.mark = ",", format = "f")
 
-# First-stage regression
-first_stage_70_90 <- lm(log(price_cpi) ~ tax_dollar, 
-                         data = final.data %>% filter(Year >= 1970 & Year <= 1990))
-summary(first_stage_70_90)
-
-# Reduced-form regression
-reduced_form_70_90 <- lm(log(sales_per_capita) ~ tax_dollar, 
-                          data = final.data %>% filter(Year >= 1970 & Year <= 1990))
-summary(reduced_form_70_90)
-
-# Regression for price elasticity (1991-2015)
-elasticity_91_15 <- lm(log(sales_per_capita) ~ log(price_cpi), 
-                        data = final.data %>% filter(Year >= 1991 & Year <= 2015))
-summary(elasticity_91_15)
-
-# IV Regression (1991-2015)
-iv_91_15 <- ivreg(log(sales_per_capita) ~ log(price_cpi) | tax_dollar, 
-                   data = final.data %>% filter(Year >= 1991 & Year <= 2015))
-summary(iv_91_15)
-
-# First-stage regression (1991-2015)
-first_stage_91_15 <- lm(log(price_cpi) ~ tax_dollar, 
-                         data = final.data %>% filter(Year >= 1991 & Year <= 2015))
-summary(first_stage_91_15)
-
-# Reduced-form regression (1991-2015)
-reduced_form_91_15 <- lm(log(sales_per_capita) ~ tax_dollar, 
-                          data = final.data %>% filter(Year >= 1991 & Year <= 2015))
-summary(reduced_form_91_15)
-
-# Print elasticities
-cat("Elasticity (1970-1990):", summary(elasticity_70_90)$coefficients[2,1], "\n")
-cat("Elasticity (1991-2015):", summary(elasticity_91_15)$coefficients[2,1], "\n")
+modelsummary(list("Estimates" = list("OLS" = ols1, "IV" = iv1, 
+                                     "OLS" = ols2, "IV" = iv2),
+                  "Reduced Form" = list("IV" = reduced.form, "IV" = reduced.form2),
+                  "First Stage" = list("IV" = first.stage, "IV" = first.stage2)),
+             shape = "rbind",
+             coef_map = c("ln_price_2012" = "Log Price",
+                          "fit_ln_price_2012" = "Fitted Log Price",
+                          "ln_tax_2012" = "Log Tax"),
+             gof_map = list(list("raw" = "N", "clean" = "N", "fmt" = f),
+                            list("raw" = "r.squared", "clean" = "R2", "fmt" = 2)),
+             output = "kableExtra") %>%
+  add_header_above(c(" " = 1, "1970 - 1990" = 2, "1991 - 2015" = 2)) %>%
+  kable_styling(latex_options = "hold_position")
 

@@ -76,19 +76,19 @@ cpi.data <- cpi.data %>%
   group_by(Year) %>%
   summarize(index=mean(index, na.rm=TRUE))
 
-# Find the average CPI index for the year 2010
-cpi_2010 <- cpi.data %>% 
-  filter(Year == 2010) %>% 
-  pull(index)  # Extract the index value for 2010
+# Find the average CPI index for the year 2012
+cpi_2012 <- cpi.data %>% 
+  filter(Year == 2012) %>% 
+  pull(index)  # Extract the index value for 2012
 
-# Print the value of CPI for 2010. The value is 218.0555
-print(paste("The average CPI index for 2010 is:", cpi_2010))
+# Print the value of CPI for 2012. The value is 229.59
+print(paste("The average CPI index for 2012 is:", cpi_2012))
 
 # Form final dataset ------------------------------------------------------
-# adjust to 2010 dollars
+# adjust to 2012 dollars
 final.data <- final.data %>%
   left_join(cpi.data, by="Year") %>%
-  mutate(price_cpi=cost_per_pack*(218/index))
+  mutate(price_cpi=cost_per_pack*(230/index))
 
 write_tsv(final.data,"data/output/TaxBurden_Data.txt",append=FALSE,col_names=TRUE)
 write_rds(final.data,"data/output/TaxBurden_Data.rds")
